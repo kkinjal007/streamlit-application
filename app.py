@@ -1,334 +1,257 @@
-# app_yolo.py
-# ------------------------------------------------------------
-# YOLOv8 Learning App (Streamlit)
-# ------------------------------------------------------------
-# How to run:
-#   pip install streamlit ultralytics opencv-python pillow numpy pandas
-#   streamlit run app_yolo.py
-#
-# What students learn:
-# - What YOLO does: object detection = boxes + labels + confidence
-# - How confidence threshold changes what appears
-# - How IoU threshold affects duplicate boxes (NMS)
-# - How class filtering works
-# - How to inspect detections as a table + counts
-#
-# Sources (Ultralytics docs):
-# - Python usage and predict mode: https://docs.ultralytics.com/usage/python/ and /modes/predict/
-# - Streamlit inference guide: https://docs.ultralytics.com/guides/streamlit-live-inference/
-# ------------------------------------------------------------
-
-import time
-from typing import List, Optional, Tuple
+# app_cnn.py
+# A *very simple* Streamlit app to demonstrate how a CNN works using MNIST (built-in Keras dataset).
+# It will:
+# 1) Load MNIST
+# 2) Build a tiny CNN
+# 3) Train it and show logs + history (loss/accuracy curves)
+# 4) Evaluate on test set
+# 5) Let you pick a random test image and see the model's prediction
 
 import streamlit as st
 import numpy as np
-import pandas as pd
-from PIL import Image
-import cv2
+import tensorflow as tf
+import matplotlib.pyplot as plt
 
-from ultralytics import YOLO
+st.set_page_config(page_title="Simple CNN Demo (MNIST)", layout="wide")
+st.title("🧠 Simple CNN Demo (MNIST)")
 
-# ----------------------------
-# Page setup
-# ----------------------------
-st.set_page_config(page_title="Learn YOLOv8 (Ultralytics) - Simple App", layout="wide")
-st.title("🎯 Learn YOLOv8 by Playing (Ultralytics + Streamlit)")
 st.write(
-    "YOLO = **You Only Look Once**.\n"
-    "It looks at an image and returns **bounding boxes + class names + confidence**.\n"
-    "Use the controls to see how detection changes."
+    "This app trains a small Convolutional Neural Network (CNN) on the **MNIST** handwritten digits dataset "
+    "and lets you test predictions on random images."
 )
 
-# ----------------------------
-# Sidebar: learning controls
-# ----------------------------
-st.sidebar.header("⚙️ YOLO Settings")
+# -----------------------------
+# Sidebar controls
+# -----------------------------
+st.sidebar.header("Training Settings")
+epochs = st.sidebar.slider("Epochs", 1, 10, 3)
+batch_size = st.sidebar.selectbox("Batch size", [32, 64, 128], index=1)
+learning_rate = st.sidebar.selectbox("Learning rate", [1e-4, 5e-4, 1e-3, 2e-3], index=2)
 
-MODEL_CHOICES = {
-    "yolov8n (fastest, smallest)": "yolov8n.pt",
-    "yolov8s (small)": "yolov8s.pt",
-    "yolov8m (medium)": "yolov8m.pt",
-    "yolov8l (large)": "yolov8l.pt",
-    "yolov8x (largest, slowest)": "yolov8x.pt",
-}
-
-model_label = st.sidebar.selectbox("Choose a model size", list(MODEL_CHOICES.keys()), index=0)
-weights = MODEL_CHOICES[model_label]
-
-conf = st.sidebar.slider("Confidence threshold (0.0–1.0)", 0.0, 1.0, 0.25, 0.01)
-iou = st.sidebar.slider("IoU threshold for NMS (0.0–1.0)", 0.0, 1.0, 0.45, 0.01)
+use_small_subset = st.sidebar.checkbox("Use small subset for faster demo", value=True)
+subset_train = st.sidebar.slider("Train subset size", 2000, 20000, 6000, 1000, disabled=not use_small_subset)
+subset_test = st.sidebar.slider("Test subset size", 500, 5000, 1500, 500, disabled=not use_small_subset)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("🎓 Quick meanings")
-st.sidebar.write(
-    "**Confidence**: how sure YOLO is.\n"
-    "- Higher = fewer boxes, more strict.\n"
-    "- Lower = more boxes, more mistakes.\n\n"
-    "**IoU**: overlap between boxes.\n"
-    "- NMS removes duplicates.\n"
-    "- Higher IoU can keep more overlapping boxes."
+seed = st.sidebar.number_input("Random seed", 0, 999999, 42, 1)
+
+# -----------------------------
+# Helper: cache data
+# -----------------------------
+@st.cache_data(show_spinner=False)
+def load_mnist():
+    (x_train, y_train), (x_test, y_test) = tf.keras.datasets.mnist.load_data()
+    return (x_train, y_train), (x_test, y_test)
+
+# -----------------------------
+# Helper: build model
+# -----------------------------
+def build_cnn(lr: float):
+    # A small CNN:
+    # - Conv detects local patterns (edges/curves)
+    # - MaxPool shrinks the image while keeping important signals
+    # - Dense layers decide which digit it is
+    model = tf.keras.Sequential(
+        [
+            tf.keras.layers.Input(shape=(28, 28, 1)),
+            tf.keras.layers.Conv2D(16, (3, 3), activation="relu", padding="same"),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Conv2D(32, (3, 3), activation="relu", padding="same"),
+            tf.keras.layers.MaxPooling2D((2, 2)),
+            tf.keras.layers.Flatten(),
+            tf.keras.layers.Dense(64, activation="relu"),
+            tf.keras.layers.Dense(10, activation="softmax"),
+        ]
+    )
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=lr),
+        loss="sparse_categorical_crossentropy",
+        metrics=["accuracy"],
+    )
+    return model
+
+# -----------------------------
+# Load and preprocess data
+# -----------------------------
+(x_train, y_train), (x_test, y_test) = load_mnist()
+
+# Normalize to [0,1] and add channel dimension (28,28) -> (28,28,1)
+x_train = (x_train.astype("float32") / 255.0)[..., None]
+x_test = (x_test.astype("float32") / 255.0)[..., None]
+
+# Use a smaller subset for fast demonstration (optional)
+rng = np.random.default_rng(int(seed))
+if use_small_subset:
+    train_idx = rng.choice(len(x_train), size=int(subset_train), replace=False)
+    test_idx = rng.choice(len(x_test), size=int(subset_test), replace=False)
+    x_train_s, y_train_s = x_train[train_idx], y_train[train_idx]
+    x_test_s, y_test_s = x_test[test_idx], y_test[test_idx]
+else:
+    x_train_s, y_train_s = x_train, y_train
+    x_test_s, y_test_s = x_test, y_test
+
+st.subheader("1) Data preview")
+c1, c2 = st.columns(2)
+with c1:
+    st.write(f"Train: **{len(x_train_s)}** images")
+    st.write(f"Test: **{len(x_test_s)}** images")
+with c2:
+    st.write("An example image:")
+    example_i = int(rng.integers(0, len(x_train_s)))
+    fig = plt.figure()
+    plt.imshow(x_train_s[example_i].squeeze(), cmap="gray")
+    plt.title(f"Label: {y_train_s[example_i]}")
+    plt.axis("off")
+    st.pyplot(fig)
+
+# -----------------------------
+# Training button
+# -----------------------------
+st.subheader("2) Train the CNN")
+
+if "model" not in st.session_state:
+    st.session_state.model = None
+if "history" not in st.session_state:
+    st.session_state.history = None
+if "train_logs" not in st.session_state:
+    st.session_state.train_logs = ""
+
+class StreamlitLogCallback(tf.keras.callbacks.Callback):
+    # This callback collects training logs so we can show them in Streamlit.
+    def on_train_begin(self, logs=None):
+        st.session_state.train_logs = ""
+
+    def on_epoch_end(self, epoch, logs=None):
+        logs = logs or {}
+        msg = (
+            f"Epoch {epoch+1}: "
+            f"loss={logs.get('loss', np.nan):.4f}, "
+            f"accuracy={logs.get('accuracy', np.nan):.4f}, "
+            f"val_loss={logs.get('val_loss', np.nan):.4f}, "
+            f"val_accuracy={logs.get('val_accuracy', np.nan):.4f}\n"
+        )
+        st.session_state.train_logs += msg
+
+train_col, info_col = st.columns([1, 2])
+
+with train_col:
+    if st.button("🚀 Train / Retrain Model", use_container_width=True):
+        with st.spinner("Training..."):
+            tf.keras.utils.set_random_seed(int(seed))
+            model = build_cnn(float(learning_rate))
+
+            history = model.fit(
+                x_train_s,
+                y_train_s,
+                validation_split=0.2,
+                epochs=int(epochs),
+                batch_size=int(batch_size),
+                verbose=0,  # we will capture our own logs via callback
+                callbacks=[StreamlitLogCallback()],
+            )
+
+            st.session_state.model = model
+            st.session_state.history = history.history
+
+with info_col:
+    st.write(
+        "- **Conv2D** learns small pattern detectors (like tiny filters).\n"
+        "- **MaxPooling** shrinks the image while keeping strong features.\n"
+        "- **Dense** layers combine learned features to decide the digit (0–9)."
+    )
+
+# Show logs and history if available
+if st.session_state.model is not None and st.session_state.history is not None:
+    st.subheader("3) Training logs + history")
+
+    log_left, plot_right = st.columns([1, 2])
+
+    with log_left:
+        st.write("📋 Logs")
+        st.text_area("Training output", st.session_state.train_logs, height=240)
+
+        st.write("✅ Evaluate on test data")
+        test_loss, test_acc = st.session_state.model.evaluate(x_test_s, y_test_s, verbose=0)
+        st.metric("Test accuracy", f"{test_acc:.3f}")
+        st.metric("Test loss", f"{test_loss:.3f}")
+
+    with plot_right:
+        hist = st.session_state.history
+
+        # Plot loss
+        fig1 = plt.figure()
+        plt.plot(hist["loss"], label="train loss")
+        plt.plot(hist["val_loss"], label="val loss")
+        plt.xlabel("Epoch")
+        plt.ylabel("Loss")
+        plt.legend()
+        st.pyplot(fig1)
+
+        # Plot accuracy
+        fig2 = plt.figure()
+        plt.plot(hist["accuracy"], label="train acc")
+        plt.plot(hist["val_accuracy"], label="val acc")
+        plt.xlabel("Epoch")
+        plt.ylabel("Accuracy")
+        plt.legend()
+        st.pyplot(fig2)
+
+# -----------------------------
+# Prediction section
+# -----------------------------
+st.subheader("4) Try predictions on random test images")
+
+if st.session_state.model is None:
+    st.info("Train the model first (click **Train / Retrain Model**) to enable predictions.")
+    st.stop()
+
+# Pick a pool of random images to choose from
+if "candidate_indices" not in st.session_state or st.button("🔁 Refresh random images"):
+    st.session_state.candidate_indices = rng.choice(len(x_test_s), size=12, replace=False).tolist()
+
+candidate_indices = st.session_state.candidate_indices
+
+# Let the user pick one of the random images
+choice = st.selectbox(
+    "Choose an image index from the random set",
+    options=list(range(len(candidate_indices))),
+    format_func=lambda i: f"Option {i+1} (test row #{candidate_indices[i]})"
 )
 
-# ----------------------------
-# Cache model loading
-# ----------------------------
-@st.cache_resource
-def load_model(weights_path: str) -> YOLO:
-    # Loads YOLO weights once and reuses them (fast for Streamlit).
-    return YOLO(weights_path)
+idx = candidate_indices[int(choice)]
+img = x_test_s[idx]
+true_label = int(y_test_s[idx])
 
-model = load_model(weights)
+# Predict probabilities and class
+probs = st.session_state.model.predict(img[None, ...], verbose=0)[0]
+pred_label = int(np.argmax(probs))
 
-# ----------------------------
-# Helper: run prediction on an image (numpy RGB)
-# ----------------------------
-def yolo_predict_image(
-    img_rgb: np.ndarray,
-    conf: float,
-    iou: float,
-    classes: Optional[List[int]] = None,
-) -> Tuple[np.ndarray, pd.DataFrame]:
-    """
-    Runs YOLO on a single RGB image and returns:
-    1) annotated image (RGB) with boxes drawn
-    2) dataframe of detections (class, name, conf, x1,y1,x2,y2)
-    """
-    # Ultralytics can accept numpy arrays directly.
-    results = model.predict(
-        source=img_rgb,
-        conf=conf,
-        iou=iou,
-        classes=classes,   # None = all classes
-        verbose=False,
-    )
+# Display
+cA, cB = st.columns([1, 1])
 
-    r = results[0]  # one image => first result
-    annotated_bgr = r.plot()  # plot() returns BGR image (OpenCV style)
-    annotated_rgb = cv2.cvtColor(annotated_bgr, cv2.COLOR_BGR2RGB)
+with cA:
+    fig = plt.figure()
+    plt.imshow(img.squeeze(), cmap="gray")
+    plt.axis("off")
+    plt.title(f"True label: {true_label}")
+    st.pyplot(fig)
 
-    det_rows = []
-    if r.boxes is not None and len(r.boxes) > 0:
-        # r.boxes.xyxy (N,4), r.boxes.conf (N,), r.boxes.cls (N,)
-        xyxy = r.boxes.xyxy.cpu().numpy()
-        confs = r.boxes.conf.cpu().numpy()
-        clss = r.boxes.cls.cpu().numpy().astype(int)
+with cB:
+    st.write("🤖 Model prediction")
+    st.success(f"Predicted: **{pred_label}**")
+    st.write("Probabilities (0–9):")
+    # Show probabilities as a simple table
+    prob_table = {str(i): float(probs[i]) for i in range(10)}
+    st.dataframe(pd.DataFrame([prob_table]), use_container_width=True)
 
-        names = r.names  # dict: class_id -> class_name
+    # Also show as a bar chart (simple visualization)
+    figp = plt.figure()
+    plt.bar(list(range(10)), probs)
+    plt.xlabel("Digit class")
+    plt.ylabel("Probability")
+    st.pyplot(figp)
 
-        for (x1, y1, x2, y2), c, k in zip(xyxy, confs, clss):
-            det_rows.append({
-                "class_id": int(k),
-                "class_name": names.get(int(k), str(int(k))),
-                "confidence": float(c),
-                "x1": float(x1),
-                "y1": float(y1),
-                "x2": float(x2),
-                "y2": float(y2),
-            })
-
-    df = pd.DataFrame(det_rows)
-    return annotated_rgb, df
-
-
-def class_picker_ui() -> Optional[List[int]]:
-    """
-    Lets user pick which classes to detect.
-    Returns list of class IDs or None for "all".
-    """
-    names = model.names  # dict class_id -> name
-    all_items = [f"{k}: {v}" for k, v in names.items()]
-
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🎯 Class filter (optional)")
-    use_filter = st.sidebar.checkbox("Detect only selected classes", value=False)
-
-    if not use_filter:
-        return None
-
-    selected = st.sidebar.multiselect(
-        "Pick classes",
-        options=all_items,
-        default=["0: person"] if "0: person" in all_items else [],
-    )
-
-    class_ids = []
-    for item in selected:
-        # item looks like "0: person"
-        cid = int(item.split(":")[0].strip())
-        class_ids.append(cid)
-
-    return class_ids if class_ids else None
-
-
-selected_classes = class_picker_ui()
-
-# ----------------------------
-# Tabs for easy learning flow
-# ----------------------------
-tab_learn, tab_image, tab_camera, tab_video = st.tabs(
-    ["📘 Learn YOLO", "🖼️ Image", "📷 Camera", "🎥 Video"]
-)
-
-with tab_learn:
-    st.subheader("What YOLO returns (the important idea)")
-    st.write(
-        "YOLO turns an image into a list of detections. Each detection has:\n"
-        "- **box**: (x1, y1, x2, y2)\n"
-        "- **class**: what it thinks it is (person, car, dog...)\n"
-        "- **confidence**: a number from 0 to 1\n"
-    )
-
-    st.subheader("How to learn fast with this app")
-    st.write(
-        "1) Start with **Image** tab → upload a photo.\n"
-        "2) Move **confidence** slider and observe:\n"
-        "   - low confidence → many boxes (including wrong ones)\n"
-        "   - high confidence → fewer, cleaner boxes\n"
-        "3) Turn on **class filter** in the sidebar (try only 'person').\n"
-        "4) Try **Video** tab to see detection frame-by-frame.\n"
-    )
-
-    st.info(
-        "Tip: Start with **yolov8n** (fast). Try bigger models only if your machine can handle it."
-    )
-
-with tab_image:
-    st.subheader("🖼️ Image Upload Detection")
-    up = st.file_uploader("Upload an image (jpg/png)", type=["jpg", "jpeg", "png"])
-    if up:
-        pil = Image.open(up).convert("RGB")
-        img_rgb = np.array(pil)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("Original")
-            st.image(pil, use_container_width=True)
-
-        with st.spinner("Running YOLO..."):
-            annotated_rgb, df = yolo_predict_image(img_rgb, conf=conf, iou=iou, classes=selected_classes)
-
-        with col2:
-            st.write("YOLO Result (boxes + labels)")
-            st.image(annotated_rgb, use_container_width=True)
-
-        st.subheader("Detections table")
-        if df.empty:
-            st.warning("No detections found. Try lowering confidence.")
-        else:
-            st.dataframe(df.sort_values("confidence", ascending=False), use_container_width=True)
-
-            st.subheader("Counts by class")
-            counts = df["class_name"].value_counts().reset_index()
-            counts.columns = ["class_name", "count"]
-            st.bar_chart(counts.set_index("class_name"))
-
-with tab_camera:
-    st.subheader("📷 Camera Photo Detection (easiest for students)")
-    st.write("Click **Take a picture**, then YOLO will detect objects in it.")
-    cam = st.camera_input("Take a picture")
-    if cam:
-        pil = Image.open(cam).convert("RGB")
-        img_rgb = np.array(pil)
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write("Your photo")
-            st.image(pil, use_container_width=True)
-
-        with st.spinner("Running YOLO..."):
-            annotated_rgb, df = yolo_predict_image(img_rgb, conf=conf, iou=iou, classes=selected_classes)
-
-        with col2:
-            st.write("YOLO Result")
-            st.image(annotated_rgb, use_container_width=True)
-
-        if not df.empty:
-            st.subheader("Detections")
-            st.dataframe(df.sort_values("confidence", ascending=False), use_container_width=True)
-
-with tab_video:
-    st.subheader("🎥 Video Detection (frame-by-frame)")
-    st.write(
-        "Upload a short video (mp4). The app runs YOLO on frames and shows an annotated preview.\n"
-        "Tip: Use **yolov8n** and a smaller video for speed."
-    )
-
-    vid = st.file_uploader("Upload a video (mp4/mov/avi)", type=["mp4", "mov", "avi"])
-    max_frames = st.slider("Max frames to process (demo)", 30, 600, 120, 10)
-    every_n = st.slider("Process every Nth frame (speed trick)", 1, 10, 2, 1)
-
-    if vid:
-        # Save uploaded video to a temp file
-        tmp_path = "temp_video.mp4"
-        with open(tmp_path, "wb") as f:
-            f.write(vid.read())
-
-        cap = cv2.VideoCapture(tmp_path)
-        if not cap.isOpened():
-            st.error("Could not open video.")
-        else:
-            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
-            st.write(f"Video frames: **{frame_count}** | FPS: **{fps:.2f}**")
-
-            run = st.button("▶️ Run YOLO on video")
-            if run:
-                preview = st.empty()
-                prog = st.progress(0)
-                info = st.empty()
-
-                processed = 0
-                shown = 0
-                t0 = time.time()
-
-                # simple counts accumulator
-                total_counts = {}
-
-                while processed < max_frames:
-                    ok, frame_bgr = cap.read()
-                    if not ok:
-                        break
-
-                    # skip frames to go faster
-                    frame_index = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-                    if frame_index % every_n != 0:
-                        continue
-
-                    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-
-                    annotated_rgb, df = yolo_predict_image(
-                        frame_rgb, conf=conf, iou=iou, classes=selected_classes
-                    )
-
-                    # update running counts
-                    if not df.empty:
-                        for name, cnt in df["class_name"].value_counts().to_dict().items():
-                            total_counts[name] = total_counts.get(name, 0) + int(cnt)
-
-                    preview.image(annotated_rgb, caption=f"Frame {frame_index}", use_container_width=True)
-
-                    processed += 1
-                    shown += 1
-                    prog.progress(min(1.0, processed / max_frames))
-
-                    elapsed = time.time() - t0
-                    info.write(f"Processed frames: **{processed}/{max_frames}** | Elapsed: **{elapsed:.1f}s**")
-
-                cap.release()
-
-                st.success("Done!")
-                if total_counts:
-                    st.subheader("Total detected counts (across processed frames)")
-                    cdf = pd.DataFrame(
-                        [{"class_name": k, "count": v} for k, v in sorted(total_counts.items(), key=lambda x: -x[1])]
-                    )
-                    st.dataframe(cdf, use_container_width=True)
-                    st.bar_chart(cdf.set_index("class_name"))
-
-# Footer tips
-st.markdown("---")
 st.caption(
-    "Learning tip: If the model detects too many wrong boxes, increase **confidence**. "
-    "If you see duplicates, try adjusting **IoU**."
+    "Tip: Increase epochs for higher accuracy, or turn off the subset option to train on the full MNIST dataset."
 )
